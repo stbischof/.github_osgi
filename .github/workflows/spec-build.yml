@@ -93,8 +93,10 @@ jobs:
             java: ${{ inputs.jdk-next }}
             bnd: ${{ inputs.bnd-current }}
             extended: true
+        # matrix is not available in a job-level if — drop the extended
+        # legs here instead
+        exclude: ${{ fromJSON(inputs.extended && '[]' || '[{"extended":true}]') }}
     name: ${{ matrix.variant }} (java ${{ matrix.java }}, bnd ${{ matrix.bnd }})
-    if: ${{ !matrix.extended || inputs.extended }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
