@@ -1,0 +1,165 @@
+# Central reusable build workflow for all org.osgi.* spec repos, called
+# from each repo's build.yml stub (otterdog blueprint require-ci-workflows).
+# Variants: main (deploy candidate, always), bnd-next and jdk-next (gated
+# behind the "extended" input). Each variant builds the whole repo,
+# resolves every tck.bndrun and runs every TCK.
+name: spec-build
+
+on:
+  workflow_call:
+    inputs:
+      deploy:
+        description: deploy SNAPSHOT to Sonatype Central snapshots
+        type: boolean
+        default: false
+      extended:
+        description: also build and test with bnd-next and with jdk-next
+        type: boolean
+        default: false
+      jdk-main:
+        description: builds the deploy variant and runs the TCKs
+        type: string
+        default: '21'
+      jdk-next:
+        description: next JDK, builds and runs the TCKs as well
+        type: string
+        default: '25'
+      bnd-current:
+        description: bnd version of the deploy variant
+        type: string
+        default: '6.4.0'
+      bnd-next:
+        description: next bnd version
+        type: string
+        default: '7.2.3'
+
+permissions:
+  contents: read
+
+jobs:
+  # Convention checks nothing else catches: blueprints enforce the common
+  # files, mvn install validates the Maven model.
+  structure:
+    # the parent-pom repo is no reactor — skip it
+    if: github.event.repository.name != 'org.osgi.maven.pom'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Required non-blueprint files exist
+        run: |
+          fail=0
+          for f in pom.xml CONTRIBUTING.md .gitattributes .editorconfig \
+                   .mvn/maven.config; do
+            [ -f "$f" ] || { echo "::error file=$f::required file missing"; fail=1; }
+          done
+          exit $fail
+
+      - name: Version lives only in .mvn/maven.config and is semver
+        run: |
+          rev=$(sed -n 's/^-Drevision=//p' .mvn/maven.config)
+          [ -n "$rev" ] || { echo "::error file=.mvn/maven.config::no -Drevision= line"; exit 1; }
+          echo "$rev" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-SNAPSHOT)?$' \
+            || { echo "::error file=.mvn/maven.config::revision '$rev' is not semver"; exit 1; }
+          ! grep -q '<revision>' pom.xml \
+            || { echo "::error file=pom.xml::duplicate <revision> property — .mvn/maven.config is the single source"; exit 1; }
+
+      - name: Reactor artifactId and parent conform
+        run: |
+          repo='${{ github.event.repository.name }}'
+          aid=$(sed -n '/<parent>/,/<\/parent>/d; s/.*<artifactId>\(.*\)<\/artifactId>.*/\1/p' pom.xml | head -1)
+          [ "$aid" = "$repo.reactor" ] \
+            || { echo "::error file=pom.xml::artifactId '$aid' != '$repo.reactor'"; exit 1; }
+          sed -n '/<parent>/,/<\/parent>/p' pom.xml \
+            | grep -q '<artifactId>org.osgi.maven.pom.parent</artifactId>' \
+            || { echo "::error file=pom.xml::parent is not org.osgi.maven.pom.parent"; exit 1; }
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: main
+            java: ${{ inputs.jdk-main }}
+            bnd: ${{ inputs.bnd-current }}
+            extended: false
+          - variant: bnd-next
+            java: ${{ inputs.jdk-main }}
+            bnd: ${{ inputs.bnd-next }}
+            extended: true
+          - variant: jdk-next
+            java: ${{ inputs.jdk-next }}
+            bnd: ${{ inputs.bnd-current }}
+            extended: true
+    name: ${{ matrix.variant }} (java ${{ matrix.java }}, bnd ${{ matrix.bnd }})
+    if: ${{ !matrix.extended || inputs.extended }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      # builds everything, resolves every tck.bndrun and runs every TCK;
+      # -runbundles are computed, never committed
+      - name: Build, resolve and test
+        run: mvn -B -ntp -Dbnd.version=${{ matrix.bnd }} install
+
+      - name: Upload jars and chapter PDFs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.variant }}
+          path: |
+            **/target/*.jar
+            **/target/spec/pdf/*.pdf
+          if-no-files-found: warn
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.variant }}
+          path: '**/target/test-reports/tck/*.xml'
+          if-no-files-found: ignore
+
+  deploy:
+    needs: build
+    if: >-
+      inputs.deploy && github.ref == 'refs/heads/main' &&
+      needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.jdk-main }}
+          cache: maven
+          # server id used by the parent pom (central-publishing-maven-plugin)
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+
+      # releases go through spec-release.yml (tag push) instead
+      - name: Guard - only SNAPSHOT versions are auto-deployed
+        run: |
+          grep -Eq '^-Drevision=[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$' .mvn/maven.config \
+            || { echo "::error::revision is not a -SNAPSHOT — refusing scheduled deploy"; exit 1; }
+
+      - name: Deploy SNAPSHOT (main variant)
+        run: >-
+          mvn -B -ntp -Pdeploy -Dgpg.skip=true -DskipTests
+          -Dbnd.version=${{ inputs.bnd-current }} deploy
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_SONATYPE_TOKEN_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_SONATYPE_TOKEN_PASSWORD }}

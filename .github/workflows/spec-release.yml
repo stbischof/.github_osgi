@@ -1,0 +1,53 @@
+# Central reusable release workflow for all org.osgi.* spec repos, called
+# from each repo's release.yml stub when a tag is pushed. The tag must
+# equal the version in .mvn/maven.config and must not be a SNAPSHOT.
+# Artifacts are built with tests, signed and staged to Maven Central; the
+# final publish stays manual in the Central portal (autoPublish: false).
+name: spec-release
+
+on:
+  workflow_call:
+    inputs:
+      jdk:
+        description: JDK used to build and deploy the release
+        type: string
+        default: '21'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard - tag must equal the version in .mvn/maven.config
+        run: |
+          rev=$(sed -n 's/^-Drevision=//p' .mvn/maven.config)
+          tag='${{ github.ref_name }}'
+          echo "$rev" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::revision '$rev' is not a plain x.y.z release version"; exit 1; }
+          [ "$tag" = "$rev" ] \
+            || { echo "::error::tag '$tag' does not match revision '$rev' in .mvn/maven.config"; exit 1; }
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.jdk }}
+          cache: maven
+          # server id used by the parent pom (central-publishing-maven-plugin)
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Build, test and deploy release
+        run: mvn -B -ntp -Pdeploy deploy
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_SONATYPE_TOKEN_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_SONATYPE_TOKEN_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
