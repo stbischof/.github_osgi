@@ -40,8 +40,6 @@ jobs:
   # Convention checks nothing else catches: blueprints enforce the common
   # files, mvn install validates the Maven model.
   structure:
-    # the parent-pom repo is no reactor — skip it
-    if: github.event.repository.name != 'org.osgi.maven.pom'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -80,23 +78,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - variant: main
-            java: ${{ inputs.jdk-main }}
-            bnd: ${{ inputs.bnd-current }}
-            extended: false
-          - variant: bnd-next
-            java: ${{ inputs.jdk-main }}
-            bnd: ${{ inputs.bnd-next }}
-            extended: true
-          - variant: jdk-next
-            java: ${{ inputs.jdk-next }}
-            bnd: ${{ inputs.bnd-current }}
-            extended: true
-        # matrix is not available in a job-level if — drop the extended
-        # legs here instead
-        exclude: ${{ fromJSON(inputs.extended && '[]' || '[{"extended":true}]') }}
-    name: ${{ matrix.variant }} (java ${{ matrix.java }}, bnd ${{ matrix.bnd }})
+        # main always; bnd-next and jdk-next only with the extended input
+        # (a job-level if has no matrix context, so the selection is here)
+        variant: ${{ fromJSON(inputs.extended && '["main", "bnd-next", "jdk-next"]' || '["main"]') }}
+    name: ${{ matrix.variant }}
+    env:
+      JAVA: ${{ matrix.variant == 'jdk-next' && inputs.jdk-next || inputs.jdk-main }}
+      BND: ${{ matrix.variant == 'bnd-next' && inputs.bnd-next || inputs.bnd-current }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,13 +93,13 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ matrix.java }}
+          java-version: ${{ env.JAVA }}
           cache: maven
 
       # builds everything, resolves every tck.bndrun and runs every TCK;
       # -runbundles are computed, never committed
       - name: Build, resolve and test
-        run: mvn -B -ntp -Dbnd.version=${{ matrix.bnd }} install
+        run: mvn -B -ntp -Dbnd.version="$BND" install
 
       - name: Upload jars and chapter PDFs
         if: always()
