@@ -114,6 +114,13 @@ jobs:
           report_paths: '**/target/test-reports/tck/*.xml'
           check_name: TCK results (${{ matrix.variant }})
           require_tests: false
+          # a TCK run is a conformance report — show every test, grouped
+          # by suite, with times and full stack traces
+          detailed_summary: true
+          include_passed: true
+          group_suite: true
+          include_time_in_summary: true
+          truncate_stack_traces: false
 
       # the bnd baseline reports (API comparison against the last release
       # on Maven Central) — readable in the job summary, downloadable as
