@@ -75,6 +75,10 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # the TCK test report is published as a check run
+      checks: write
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +104,45 @@ jobs:
       # -runbundles are computed, never committed
       - name: Build, resolve and test
         run: mvn -B -ntp -Dbnd.version="$BND" install
+
+      # renders the JUnit XML of the TCK runs as a check run with
+      # annotations and a job summary
+      - name: TCK test report
+        if: always()
+        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        with:
+          report_paths: '**/target/test-reports/tck/*.xml'
+          check_name: TCK results (${{ matrix.variant }})
+          require_tests: false
+
+      # the bnd baseline reports (API comparison against the last release
+      # on Maven Central) — readable in the job summary, downloadable as
+      # an artifact
+      - name: Baseline report to job summary
+        if: always()
+        run: |
+          shopt -s globstar nullglob
+          files=(**/target/baseline/*.txt)
+          [ ${#files[@]} -eq 0 ] && exit 0
+          {
+            echo "### bnd baseline — ${{ matrix.variant }}"
+            for f in "${files[@]}"; do
+              echo "<details><summary>${f}</summary>"
+              echo
+              echo '```'
+              cat "$f"
+              echo '```'
+              echo "</details>"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload baseline reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-${{ matrix.variant }}
+          path: '**/target/baseline/*.txt'
+          if-no-files-found: ignore
 
       - name: Upload jars and chapter PDFs
         if: always()
