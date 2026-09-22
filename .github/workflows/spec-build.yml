@@ -102,9 +102,11 @@ jobs:
 
       # builds everything, resolves every tck.bndrun and runs every TCK;
       # -runbundles are computed, never committed. -U forces snapshot
-      # updates: the cached ~/.m2 must not pin a stale parent pom
+      # updates: the cached ~/.m2 must not pin a stale parent pom.
+      # javadoc-check builds the javadoc jars too, so a PR already fails
+      # on javadoc errors instead of the deploy after the merge
       - name: Build, resolve and test
-        run: mvn -B -ntp -U -Dbnd.version="$BND" install
+        run: mvn -B -ntp -U -Pjavadoc-check -Dbnd.version="$BND" install
 
       # renders the JUnit XML of the TCK runs as a check run with
       # annotations and a job summary
