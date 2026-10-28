@@ -1,0 +1,14 @@
+# The reusable workflows in this repo hold every action version of the
+# org.osgi.* repos; the repos themselves only carry stubs. One group, so
+# actions that must move together (codeql-action init/analyze/upload-sarif)
+# arrive in a single pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"

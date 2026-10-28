@@ -1,8 +1,14 @@
-# Central reusable build workflow for all org.osgi.* spec repos, called
-# from each repo's build.yml stub (otterdog blueprint require-ci-workflows).
-# Variants: main (deploy candidate, always), bnd-next and jdk-next (gated
-# behind the "extended" input). Each variant builds the whole repo,
-# resolves every tck.bndrun and runs every TCK.
+# Central reusable build workflow for all org.osgi.* spec repos and the
+# parent pom (org.osgi.maven.pom), called from each repo's build.yml stub
+# (otterdog blueprints require-ci-workflows and require-ci-workflows-pom).
+# Every action version of the build lives here, pinned by commit SHA and
+# kept current by Dependabot on this repo; the stubs carry no versions.
+# Variants: main (deploy candidate, bnd.version and bnd.tck.version of the
+# parent pom), bnd-next (always, as a test of the latest bnd snapshot for
+# the build, the resolver and the tester; its failure does not fail the
+# build) and jdk-next (gated behind the
+# "extended" input). Each variant builds the whole repo, verifies every
+# tck.bndrun and runs every TCK.
 name: spec-build
 
 on:
@@ -13,7 +19,7 @@ on:
         type: boolean
         default: false
       extended:
-        description: also build and test with bnd-next and with jdk-next
+        description: also build and test with jdk-next
         type: boolean
         default: false
       jdk-main:
@@ -24,14 +30,10 @@ on:
         description: next JDK, builds and runs the TCKs as well
         type: string
         default: '25'
-      bnd-current:
-        description: bnd version of the deploy variant
-        type: string
-        default: '6.4.0'
-      bnd-next:
-        description: next bnd version
-        type: string
-        default: '7.2.3'
+      structure:
+        description: check the spec repo conventions (reactor, .mvn/maven.config)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -40,10 +42,12 @@ jobs:
   # Convention checks nothing else catches: blueprints enforce the common
   # files, mvn install validates the Maven model.
   structure:
+    # the parent pom is no reactor and calls with structure: false
+    if: inputs.structure
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Required non-blueprint files exist
         run: |
@@ -82,34 +86,79 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # main always; bnd-next and jdk-next only with the extended input
+        # main and bnd-next always; jdk-next only with the extended input
         # (a job-level if has no matrix context, so the selection is here)
-        variant: ${{ fromJSON(inputs.extended && '["main", "bnd-next", "jdk-next"]' || '["main"]') }}
+        variant: ${{ fromJSON(inputs.extended && '["main", "bnd-next", "jdk-next"]' || '["main", "bnd-next"]') }}
     name: ${{ matrix.variant }}
+    # only main decides; the other variants are tests of what comes next
+    # (a TCK run may hang with a next bnd, so they get a time limit)
+    continue-on-error: ${{ matrix.variant != 'main' }}
+    timeout-minutes: ${{ matrix.variant == 'main' && 360 || 60 }}
     env:
       JAVA: ${{ matrix.variant == 'jdk-next' && inputs.jdk-next || inputs.jdk-main }}
-      BND: ${{ matrix.variant == 'bnd-next' && inputs.bnd-next || inputs.bnd-current }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: ${{ env.JAVA }}
           cache: maven
 
-      # builds everything, resolves every tck.bndrun and runs every TCK;
-      # -runbundles are computed, never committed
-      - name: Build, resolve and test
-        run: mvn -B -ntp -Dbnd.version="$BND" install
+      # builds everything, verifies the committed -runbundles of every
+      # tck.bndrun and runs every TCK. bnd-next takes the latest bnd
+      # snapshot from the bnd snapshot repository (settings.xml of this job
+      # only) for bnd.version and bnd.tck.version; the parent pom knows
+      # neither the snapshot version nor the repository. -U forces snapshot
+      # updates: the cached ~/.m2 must not pin a stale parent pom
+      - name: Build, verify and test
+        run: |
+          mvn_args=()
+          if [ "${{ matrix.variant }}" = bnd-next ]; then
+            repo=https://bndtools.jfrog.io/bndtools/libs-snapshot
+            next=$(curl -fsSL "$repo/biz/aQute/bnd/bnd-maven-plugin/maven-metadata.xml" \
+              | sed -n 's:.*<latest>\(.*\)</latest>.*:\1:p')
+            [ -n "$next" ] || { echo "::error::no bnd snapshot found in $repo"; exit 1; }
+            echo "bnd-next: bnd $next"
+            cat > "$RUNNER_TEMP/bnd-snapshots.xml" <<SETTINGS
+          <settings>
+            <profiles>
+              <profile>
+                <id>bnd-snapshots</id>
+                <repositories>
+                  <repository>
+                    <id>bnd-snapshots</id>
+                    <url>$repo/</url>
+                    <releases><enabled>false</enabled></releases>
+                    <snapshots><enabled>true</enabled></snapshots>
+                  </repository>
+                </repositories>
+                <pluginRepositories>
+                  <pluginRepository>
+                    <id>bnd-snapshots</id>
+                    <url>$repo/</url>
+                    <releases><enabled>false</enabled></releases>
+                    <snapshots><enabled>true</enabled></snapshots>
+                  </pluginRepository>
+                </pluginRepositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>bnd-snapshots</activeProfile>
+            </activeProfiles>
+          </settings>
+          SETTINGS
+            mvn_args=(-s "$RUNNER_TEMP/bnd-snapshots.xml" "-Dbnd.version=$next" "-Dbnd.tck.version=$next")
+          fi
+          mvn -B -ntp -U "${mvn_args[@]}" install
 
       # renders the JUnit XML of the TCK runs as a check run with
       # annotations and a job summary
       - name: TCK test report
         if: always()
-        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
         with:
           report_paths: '**/target/test-reports/tck/*.xml'
           check_name: TCK results (${{ matrix.variant }})
@@ -145,61 +194,88 @@ jobs:
 
       - name: Upload baseline reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: baseline-${{ matrix.variant }}
           path: '**/target/baseline/*.txt'
           if-no-files-found: ignore
 
-      - name: Upload jars and chapter PDFs
+      - name: Upload jars and chapter PDFs and HTML
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-${{ matrix.variant }}
           path: |
             **/target/*.jar
             **/target/spec/pdf/*.pdf
+            **/target/spec/html/**
           if-no-files-found: warn
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-reports-${{ matrix.variant }}
           path: '**/target/test-reports/tck/*.xml'
           if-no-files-found: ignore
 
-  deploy:
-    needs: build
-    if: >-
-      inputs.deploy && github.ref == 'refs/heads/main' &&
-      needs.build.result == 'success'
+  # own check outside the matrix: a PR already fails on javadoc errors
+  # instead of the deploy job after the merge
+  javadoc:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.jdk-main }}
+          cache: maven
+
+      - name: Build javadoc jars
+        run: >-
+          mvn -B -ntp -U -DskipTests -Pjavadoc-check package
+
+  deploy:
+    needs: [build, javadoc]
+    if: >-
+      inputs.deploy && github.ref == 'refs/heads/main' &&
+      needs.build.result == 'success' && needs.javadoc.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: ${{ inputs.jdk-main }}
           cache: maven
           # server id used by the parent pom (central-publishing-maven-plugin)
           server-id: central
-          server-username: CENTRAL_USERNAME
-          server-password: CENTRAL_PASSWORD
+          server-username-env-var: CENTRAL_USERNAME
+          server-password-env-var: CENTRAL_PASSWORD
+          # Maven 3.10 offers the credentials of a server only to the origins
+          # bound to its id, and the id central is bound to
+          # repo.maven.apache.org: the token has to reach central.sonatype.com
+          mvn-server-repository-origins: |
+            central:https://central.sonatype.com
 
       # releases go through spec-release.yml (tag push) instead
+      # spec repos: -Drevision in .mvn/maven.config; the parent pom: literal
+      # <version> in pom.xml
       - name: Guard - only SNAPSHOT versions are auto-deployed
         run: |
-          grep -Eq '^-Drevision=[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$' .mvn/maven.config \
-            || { echo "::error::revision is not a -SNAPSHOT — refusing scheduled deploy"; exit 1; }
+          v=$(sed -n 's/^-Drevision=//p' .mvn/maven.config)
+          [ -n "$v" ] || v=$(mvn -B -q -ntp help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$' \
+            || { echo "::error::version '$v' is not a -SNAPSHOT — refusing scheduled deploy"; exit 1; }
 
       - name: Deploy SNAPSHOT (main variant)
-        run: >-
-          mvn -B -ntp -Pdeploy -Dgpg.skip=true -DskipTests
-          -Dbnd.version=${{ inputs.bnd-current }} deploy
+        run: mvn -B -ntp -U -Pdeploy -Dgpg.skip=true -DskipTests deploy
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_SONATYPE_TOKEN_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_SONATYPE_TOKEN_PASSWORD }}
